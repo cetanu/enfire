@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -6,9 +7,7 @@ use tokio::sync::mpsc::Sender;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::proto::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessor;
-use crate::proto::envoy::service::ext_proc::v3::processing_request::Request::{
-    RequestBody, RequestHeaders, ResponseBody, ResponseHeaders,
-};
+use crate::proto::envoy::service::ext_proc::v3::processing_request::Request::RequestHeaders;
 use crate::proto::envoy::service::ext_proc::v3::{ProcessingRequest, ProcessingResponse};
 use crate::storage::Storage;
 
@@ -32,15 +31,19 @@ impl ExternalProcessor for EnfireService {
 
         let response = async_stream::try_stream! {
         while let Some(req) = stream.message().await? {
-            let task = EnfireTask::from_request(req.clone());
-            let tx = task_tx.clone();
+            if let Some(task) = EnfireTask::from_request(req.clone()) {
+                println!("Processing task: {task:?}");
+                let tx = task_tx.clone();
 
-            // Fire and forget: send task to background
-            tokio::spawn(async move {
-                if let Err(e) = tx.send(task).await {
-                    eprintln!("Failed to send task: {}", e);
-                }
-            });
+                // Fire and forget: send task to background
+                tokio::spawn(async move {
+                    if let Err(e) = tx.send(task).await {
+                        eprintln!("Failed to send task: {}", e);
+                    }
+                });
+            } else {
+                eprintln!("Failed to parse request: {req:?}");
+            }
 
             yield ProcessingResponse {
                 ..Default::default()
@@ -52,31 +55,59 @@ impl ExternalProcessor for EnfireService {
 
 #[derive(Debug)]
 pub struct EnfireTask {
-    pub detail: String,
+    pub ip: String,
+    pub path: String,
+    pub key: Option<String>,
 }
 
 impl EnfireTask {
-    pub fn from_request(message: ProcessingRequest) -> Self {
+    pub fn from_request(message: ProcessingRequest) -> Option<Self> {
         if let Some(request) = message.request {
-            match request {
+            let headers = match request {
                 RequestHeaders(req) => {
-                    for header in req.headers.unwrap().headers {
-                        println!("Received= {}: {}", header.key, header.value);
-                    }
+                    let h = req
+                        .headers
+                        .and_then(|v| Some(v.headers))
+                        .unwrap_or_else(|| vec![]);
+                    HashMap::from_iter(h.into_iter().map(|i| (i.key, i.value)))
                 }
-                ResponseHeaders(req) => todo!(),
-                RequestBody(req) => todo!(),
-                ResponseBody(req) => todo!(),
-                _ => todo!(),
+                _ => HashMap::new(),
             };
+            return Some(Self {
+                ip: headers
+                    .get("x-forwarded-for")
+                    .and_then(|val| val.split(",").next())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                path: headers
+                    .get(":path")
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|| "/".into()),
+                key: None, // TODO: use this for custom header key
+            });
         };
-        Self {
-            detail: "foo".into(),
-        }
+        None
     }
-
     pub async fn execute(self, storage: Arc<dyn Storage + Send + Sync>) {
-        println!("Executing background task: {:?}", self.detail);
-        let _ = storage.save_event(self.detail).await;
+        println!("Checking IP {} on {}...", self.ip, self.path);
+        let _ = storage
+            .record_request(&self.ip, &self.path, self.key.as_deref())
+            .await;
+
+        if let Ok(true) = storage
+            .is_abusive(&self.ip, &self.path, self.key.as_deref())
+            .await
+        {
+            println!("[ABUSE] IP {} is abusive on {}", self.ip, self.path);
+        } else {
+            println!("IP not abusive");
+        }
+
+        let _ = storage
+            .save_event(format!(
+                "IP={} PATH={} KEY={:?}",
+                self.ip, self.path, self.key
+            ))
+            .await;
     }
 }
