@@ -18,7 +18,7 @@ fn header(key: &str, value: &str) -> HeaderValue {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ExternalProcessorClient::connect("http://[::1]:50051").await?;
-    let stream = tokio_stream::iter(1..1000).map(|_| ProcessingRequest {
+    let stream = tokio_stream::iter(1..10).map(|_| ProcessingRequest {
         request: Some(Request::RequestHeaders(HttpHeaders {
             headers: Some(HeaderMap {
                 headers: vec![

@@ -13,7 +13,7 @@ use crate::storage::Storage;
 
 #[derive(Clone)]
 pub struct EnfireService {
-    pub task_tx: Sender<EnfireTask>,
+    pub background_tasks: Sender<EnfireTask>,
     pub storage: Arc<dyn Storage + Send + Sync>,
 }
 
@@ -26,23 +26,18 @@ impl ExternalProcessor for EnfireService {
         request: Request<Streaming<ProcessingRequest>>,
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let mut stream = request.into_inner();
-
-        let task_tx = self.task_tx.clone();
-
+        let task_channel = self.background_tasks.clone();
         let response = async_stream::try_stream! {
         while let Some(req) = stream.message().await? {
             if let Some(task) = EnfireTask::from_request(req.clone()) {
-                println!("Processing task: {task:?}");
-                let tx = task_tx.clone();
+                let sender = task_channel.clone();
 
                 // Fire and forget: send task to background
                 tokio::spawn(async move {
-                    if let Err(e) = tx.send(task).await {
+                    if let Err(e) = sender.send(task).await {
                         eprintln!("Failed to send task: {}", e);
                     }
                 });
-            } else {
-                eprintln!("Failed to parse request: {req:?}");
             }
 
             yield ProcessingResponse {
@@ -88,26 +83,20 @@ impl EnfireTask {
         };
         None
     }
-    pub async fn execute(self, storage: Arc<dyn Storage + Send + Sync>) {
-        println!("Checking IP {} on {}...", self.ip, self.path);
+
+    pub async fn run(self, storage: Arc<dyn Storage + Send + Sync>) {
         let _ = storage
             .record_request(&self.ip, &self.path, self.key.as_deref())
             .await;
 
-        if let Ok(true) = storage
+        let is_abusive = storage
             .is_abusive(&self.ip, &self.path, self.key.as_deref())
-            .await
-        {
+            .await;
+
+        if let Ok(true) = is_abusive {
             println!("[ABUSE] IP {} is abusive on {}", self.ip, self.path);
         } else {
-            println!("IP not abusive");
+            println!("[OKAY ] IP {} not abusive on {}", self.ip, self.path);
         }
-
-        let _ = storage
-            .save_event(format!(
-                "IP={} PATH={} KEY={:?}",
-                self.ip, self.path, self.key
-            ))
-            .await;
     }
 }

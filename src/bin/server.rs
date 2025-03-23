@@ -12,10 +12,9 @@ use enfire::storage::SqliteStorage;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::1]:50051".parse()?;
     let (tx, mut rx) = mpsc::channel::<EnfireTask>(100);
-
     let storage = Arc::new(SqliteStorage::new("data/enfire.db").await?);
     let service = EnfireService {
-        task_tx: tx.clone(),
+        background_tasks: tx.clone(),
         storage: storage.clone(),
     };
 
@@ -24,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let storage = storage.clone();
         async move {
             while let Some(task) = rx.recv().await {
-                task.execute(storage.clone()).await;
+                task.run(storage.clone()).await;
             }
         }
     });
@@ -34,6 +33,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(ExternalProcessorServer::new(service))
         .serve(addr)
         .await?;
-
     Ok(())
 }

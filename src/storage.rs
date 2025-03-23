@@ -5,10 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[async_trait]
 pub trait Storage: Send + Sync {
-    async fn save_event(&self, detail: String) -> anyhow::Result<()>;
-
     async fn record_request(&self, ip: &str, path: &str, key: Option<&str>) -> anyhow::Result<()>;
-
     async fn is_abusive(&self, ip: &str, path: &str, key: Option<&str>) -> anyhow::Result<bool>;
 }
 
@@ -67,14 +64,6 @@ impl SqliteStorage {
 
 #[async_trait]
 impl Storage for SqliteStorage {
-    async fn save_event(&self, detail: String) -> anyhow::Result<()> {
-        sqlx::query("INSERT INTO events (detail) VALUES (?)")
-            .bind(detail)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     async fn record_request(&self, ip: &str, path: &str, key: Option<&str>) -> anyhow::Result<()> {
         let ts = Self::now_unix_ts();
 
